@@ -7,7 +7,6 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -459,6 +458,7 @@
 <!-- TOAST -->
 <div id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 // ═══════════════════════════════════════════════════════════
 //  UTILITIES
@@ -538,15 +538,37 @@ if (sbUrl && sbKey) {
 }
 
 // ── Setup modal ──
-$('#save-setup-btn').onclick = () => {
+$('#save-setup-btn').onclick = async () => {
   const url = $('#sb-url').value.trim();
   const key = $('#sb-key').value.trim();
   if (!url || !key) { showToast('Please fill both fields'); return; }
-  localStorage.setItem('jt_sb_url', url);
-  localStorage.setItem('jt_sb_key', key);
-  initSupabase(url, key);
-  $('#setup-modal').classList.add('hidden');
-  showToast('Credentials saved — will verify on first sync');
+
+  if (!window.supabase) {
+    showToast('Supabase library not loaded — check your connection');
+    return;
+  }
+
+  const btn = $('#save-setup-btn');
+  btn.textContent = 'Connecting…';
+  btn.disabled = true;
+
+  try {
+    initSupabase(url, key);
+    // Test the connection with a lightweight query
+    const { error } = await supabase.from('runs').select('id').limit(1);
+    if (error && error.code !== 'PGRST116') throw error;
+    localStorage.setItem('jt_sb_url', url);
+    localStorage.setItem('jt_sb_key', key);
+    $('#setup-modal').classList.add('hidden');
+    showToast('Connected to Supabase ✓');
+  } catch(e) {
+    supabase = null;
+    showToast('Connection failed: ' + (e.message || JSON.stringify(e)));
+    console.error('Supabase connect error:', e);
+  } finally {
+    btn.textContent = 'Connect';
+    btn.disabled = false;
+  }
 };
 $('#skip-setup-btn').onclick = () => {
   $('#setup-modal').classList.add('hidden');
@@ -560,14 +582,35 @@ $('#settings-btn').onclick = () => {
   $('#settings-modal').classList.remove('hidden');
 };
 $('#close-settings-btn').onclick = () => $('#settings-modal').classList.add('hidden');
-$('#save-settings-btn').onclick = () => {
+$('#save-settings-btn').onclick = async () => {
   const url = $('#settings-sb-url').value.trim();
   const key = $('#settings-sb-key').value.trim();
-  localStorage.setItem('jt_sb_url', url);
-  localStorage.setItem('jt_sb_key', key);
-  initSupabase(url, key);
-  $('#settings-modal').classList.add('hidden');
-  showToast('Settings saved ✓');
+
+  if (!window.supabase) {
+    showToast('Supabase library not loaded — check your connection');
+    return;
+  }
+
+  const btn = $('#save-settings-btn');
+  btn.textContent = 'Connecting…';
+  btn.disabled = true;
+
+  try {
+    initSupabase(url, key);
+    const { error } = await supabase.from('runs').select('id').limit(1);
+    if (error && error.code !== 'PGRST116') throw error;
+    localStorage.setItem('jt_sb_url', url);
+    localStorage.setItem('jt_sb_key', key);
+    $('#settings-modal').classList.add('hidden');
+    showToast('Connected to Supabase ✓');
+  } catch(e) {
+    supabase = null;
+    showToast('Connection failed: ' + (e.message || JSON.stringify(e)));
+    console.error('Supabase settings error:', e);
+  } finally {
+    btn.textContent = 'Save';
+    btn.disabled = false;
+  }
 };
 
 // ═══════════════════════════════════════════════════════════
