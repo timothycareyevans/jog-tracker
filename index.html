@@ -518,7 +518,9 @@ if (!deviceId) {
 function initSupabase(url, key) {
   if (!url || !key) return;
   try {
-    supabase = window.supabase.createClient(url, key);
+    supabase = window.supabase.createClient(url, key, {
+      global: { headers: { 'x-device-id': deviceId } }
+    });
   } catch(e) {
     console.warn('Supabase init failed:', e);
     supabase = null;
@@ -805,9 +807,11 @@ async function loadHistory() {
         .eq('device_id', deviceId)
         .order('date', { ascending: false })
         .limit(50);
-      if (!error && data) runs = data;
+      if (error) throw error;
+      if (data) runs = data;
     } catch(e) {
       console.warn('History fetch error:', e);
+      showToast('Cloud sync error: ' + (e.message || e));
     }
   }
 
@@ -906,8 +910,12 @@ async function loadStats() {
         .eq('device_id', deviceId)
         .order('date', { ascending: false })
         .limit(200);
-      if (!error && data) runs = data;
-    } catch(e) {}
+      if (error) throw error;
+      if (data) runs = data;
+    } catch(e) {
+      console.warn('Stats fetch error:', e);
+      showToast('Cloud sync error: ' + (e.message || e));
+    }
   }
   if (!runs.length) {
     const local = JSON.parse(localStorage.getItem('jt_local_runs') || '[]');
