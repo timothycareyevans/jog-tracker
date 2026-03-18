@@ -544,7 +544,7 @@ $('#save-setup-btn').onclick = () => {
   localStorage.setItem('jt_sb_key', key);
   initSupabase(url, key);
   $('#setup-modal').classList.add('hidden');
-  showToast('Connected to Supabase ✓');
+  showToast('Credentials saved — will verify on first sync');
 };
 $('#skip-setup-btn').onclick = () => {
   $('#setup-modal').classList.add('hidden');
