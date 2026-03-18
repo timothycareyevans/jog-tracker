@@ -11,35 +11,65 @@ A single-file web app for tracking runs with live GPS, route maps, history, stat
 - Run history with expandable route maps
 - Stats charts: weekly distance, pace trend
 - Weekly goals with progress bars
-- Cloud sync via Supabase (optional — works offline with localStorage)
+- Cloud sync via Firebase Firestore (optional — works offline with localStorage)
 
-## Supabase Setup (optional)
+## Firebase Setup (optional)
 
-1. Create a free project at [supabase.com](https://supabase.com)
-2. Go to **SQL Editor** and run:
+### 1. Create a Firebase project
 
-```sql
-create table runs (
-  id uuid primary key default gen_random_uuid(),
-  device_id text not null,
-  date timestamptz default now(),
-  duration_seconds int,
-  distance_meters float,
-  avg_pace_sec_per_km float,
-  coordinates jsonb,
-  notes text
-);
+1. Go to [firebase.google.com](https://firebase.google.com) → **Add project**
+2. Name it anything, disable Google Analytics if you like
+
+### 2. Enable Anonymous Authentication
+
+Firebase console → **Build → Authentication → Sign-in method** → enable **Anonymous**
+
+### 3. Enable Firestore
+
+Firebase console → **Build → Firestore Database** → **Create database** → choose a region → start in **production mode**
+
+### 4. Set Firestore security rules
+
+In Firestore → **Rules** tab, replace the default rules with:
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId}/runs/{runId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
 ```
 
-3. Open the app — on first launch enter your **Project URL** and **Anon Key** from:
-   Supabase dashboard → Settings → API
+Click **Publish**.
 
-> **No Supabase?** Just click "Skip" on the setup modal. All runs will be saved to your browser's localStorage.
+### 5. Get your credentials
+
+Firebase console → **Project Settings** (gear icon) → **General** → scroll to **Your apps** → click **</>** (Web) to register an app → copy:
+- **API Key** (`apiKey`)
+- **Project ID** (`projectId`)
+
+### 6. Connect the app
+
+Open JogTracker, enter your **API Key** and **Project ID** when prompted, click **Connect**.
+
+> **No Firebase?** Click **Skip** — all runs save to your browser's localStorage automatically.
+
+## Data structure
+
+Runs are stored as Firestore documents at:
+```
+users/{anonymousUid}/runs/{runId}
+```
+
+Each document contains: `date`, `duration_seconds`, `distance_meters`, `avg_pace_sec_per_km`, `coordinates` (array of `{lat, lng, ts}`), `notes`.
 
 ## Stack
 
 - Plain HTML/CSS/JS (single file, no build step)
 - [Leaflet.js](https://leafletjs.com) — interactive maps
 - [Chart.js](https://www.chartjs.org) — stats charts
-- [Supabase JS v2](https://supabase.com/docs/reference/javascript) — cloud storage
+- [Firebase JS SDK v10](https://firebase.google.com/docs/web/setup) — Firestore + Anonymous Auth
 - Browser Geolocation API — live GPS via `watchPosition()`

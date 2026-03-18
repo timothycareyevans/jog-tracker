@@ -404,16 +404,16 @@
 <div class="modal-overlay" id="setup-modal">
   <div class="modal">
     <h2>Welcome to JogTracker!</h2>
-    <p>Enter your Supabase credentials to enable cloud sync. Find these in your Supabase project → Settings → API.</p>
+    <p>Enter your Firebase credentials to enable cloud sync. Find these in the Firebase console → Project Settings → General → Your apps.</p>
     <div class="form-row">
-      <label>Supabase Project URL</label>
-      <input type="url" id="sb-url" placeholder="https://xxxx.supabase.co">
+      <label>Firebase API Key</label>
+      <input type="text" id="fb-apikey" placeholder="AIzaSy…">
     </div>
     <div class="form-row">
-      <label>Supabase Anon Key</label>
-      <input type="text" id="sb-key" placeholder="eyJhbGciOiJIUzI1NiIs…">
+      <label>Firebase Project ID</label>
+      <input type="text" id="fb-projectid" placeholder="my-project-12345">
     </div>
-    <p style="margin-top:8px;font-size:.75rem">Don't have Supabase? <a href="https://supabase.com" target="_blank" style="color:var(--accent)">Create a free project</a>. Then run the SQL from the README to create the <code>runs</code> table.</p>
+    <p style="margin-top:8px;font-size:.75rem">Don't have Firebase? <a href="https://firebase.google.com" target="_blank" style="color:var(--accent)">Create a free project</a>. Then enable Firestore and Anonymous Auth in the console.</p>
     <div class="modal-actions">
       <button class="btn-secondary" id="skip-setup-btn">Skip (local only)</button>
       <button class="btn-primary" id="save-setup-btn">Connect</button>
@@ -426,12 +426,12 @@
   <div class="modal">
     <h2>Settings</h2>
     <div class="form-row">
-      <label>Supabase Project URL</label>
-      <input type="url" id="settings-sb-url" placeholder="https://xxxx.supabase.co">
+      <label>Firebase API Key</label>
+      <input type="text" id="settings-fb-apikey" placeholder="AIzaSy…">
     </div>
     <div class="form-row">
-      <label>Supabase Anon Key</label>
-      <input type="text" id="settings-sb-key" placeholder="eyJhbGciOiJIUzI1NiIs…">
+      <label>Firebase Project ID</label>
+      <input type="text" id="settings-fb-projectid" placeholder="my-project-12345">
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" id="close-settings-btn">Cancel</button>
@@ -458,7 +458,10 @@
 <!-- TOAST -->
 <div id="toast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- Firebase compat SDKs — loaded last so they're ready before the inline script -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════════
 //  UTILITIES
@@ -506,130 +509,112 @@ function haversine(lat1, lng1, lat2, lng2) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  STATE & INIT
+//  FIREBASE STATE
 // ═══════════════════════════════════════════════════════════
-let supabase = null;
-let deviceId = localStorage.getItem('jt_device_id');
-if (!deviceId) {
-  deviceId = crypto.randomUUID();
-  localStorage.setItem('jt_device_id', deviceId);
-}
+let db = null;
+let currentUid = null;
+let authReady = null; // Promise<uid>
 
-function initSupabase(url, key) {
-  if (!url || !key) return;
-  try {
-    supabase = window.supabase.createClient(url, key, {
-      global: { headers: { 'x-device-id': deviceId } }
-    });
-  } catch(e) {
-    console.warn('Supabase init failed:', e);
-    supabase = null;
+function initFirebase(apiKey, projectId) {
+  // Delete any existing Firebase app first
+  if (firebase.apps.length > 0) {
+    firebase.apps.forEach(app => app.delete());
   }
+  firebase.initializeApp({
+    apiKey,
+    projectId,
+    authDomain: `${projectId}.firebaseapp.com`
+  });
+  db = firebase.firestore();
+  authReady = firebase.auth()
+    .signInAnonymously()
+    .then(cred => {
+      currentUid = cred.user.uid;
+      return currentUid;
+    });
 }
 
-const sbUrl = localStorage.getItem('jt_sb_url');
-const sbKey = localStorage.getItem('jt_sb_key');
+// ── Boot: restore saved credentials ──
+const savedApiKey    = localStorage.getItem('jt_fb_apikey');
+const savedProjectId = localStorage.getItem('jt_fb_projectid');
 
-if (sbUrl && sbKey) {
-  initSupabase(sbUrl, sbKey);
-  $('#setup-modal').classList.add('hidden');
+if (savedApiKey && savedProjectId) {
+  try {
+    initFirebase(savedApiKey, savedProjectId);
+    $('#setup-modal').classList.add('hidden');
+  } catch(e) {
+    console.warn('Firebase auto-init failed:', e);
+    $('#setup-modal').classList.remove('hidden');
+  }
 } else {
   $('#setup-modal').classList.remove('hidden');
 }
 
-// ── Setup modal ──
-$('#save-setup-btn').onclick = async () => {
-  const url = $('#sb-url').value.trim();
-  const key = $('#sb-key').value.trim();
-  if (!url || !key) { showToast('Please fill both fields'); return; }
+// ── Shared connect logic ──
+async function connectFirebase(apiKey, projectId, connectBtn, onSuccess) {
+  if (!apiKey || !projectId) { showToast('Please fill both fields'); return; }
 
-  if (!window.supabase) {
-    showToast('Supabase library not loaded — check your connection');
-    return;
-  }
-
-  const btn = $('#save-setup-btn');
-  btn.textContent = 'Connecting…';
-  btn.disabled = true;
+  connectBtn.textContent = 'Connecting…';
+  connectBtn.disabled = true;
 
   try {
-    initSupabase(url, key);
-    // Test the connection with a lightweight query
-    const { error } = await supabase.from('runs').select('id').limit(1);
-    if (error && error.code !== 'PGRST116') throw error;
-    localStorage.setItem('jt_sb_url', url);
-    localStorage.setItem('jt_sb_key', key);
-    $('#setup-modal').classList.add('hidden');
-    showToast('Connected to Supabase ✓');
+    initFirebase(apiKey, projectId);
+    await authReady; // throws if auth fails (bad key, project not found, etc.)
+    localStorage.setItem('jt_fb_apikey', apiKey);
+    localStorage.setItem('jt_fb_projectid', projectId);
+    onSuccess();
+    showToast('Connected to Firebase ✓');
   } catch(e) {
-    supabase = null;
+    db = null; currentUid = null; authReady = null;
     showToast('Connection failed: ' + (e.message || JSON.stringify(e)));
-    console.error('Supabase connect error:', e);
+    console.error('Firebase connect error:', e);
   } finally {
-    btn.textContent = 'Connect';
-    btn.disabled = false;
+    connectBtn.textContent = 'Connect';
+    connectBtn.disabled = false;
   }
+}
+
+// ── Setup modal ──
+$('#save-setup-btn').onclick = () => {
+  const apiKey    = $('#fb-apikey').value.trim();
+  const projectId = $('#fb-projectid').value.trim();
+  connectFirebase(apiKey, projectId, $('#save-setup-btn'), () => {
+    $('#setup-modal').classList.add('hidden');
+  });
 };
 $('#skip-setup-btn').onclick = () => {
   $('#setup-modal').classList.add('hidden');
   showToast('Running in local-only mode');
 };
 
-// ── Settings ──
+// ── Settings modal ──
 $('#settings-btn').onclick = () => {
-  $('#settings-sb-url').value = localStorage.getItem('jt_sb_url') || '';
-  $('#settings-sb-key').value = localStorage.getItem('jt_sb_key') || '';
+  $('#settings-fb-apikey').value    = localStorage.getItem('jt_fb_apikey') || '';
+  $('#settings-fb-projectid').value = localStorage.getItem('jt_fb_projectid') || '';
   $('#settings-modal').classList.remove('hidden');
 };
 $('#close-settings-btn').onclick = () => $('#settings-modal').classList.add('hidden');
-$('#save-settings-btn').onclick = async () => {
-  const url = $('#settings-sb-url').value.trim();
-  const key = $('#settings-sb-key').value.trim();
-
-  if (!window.supabase) {
-    showToast('Supabase library not loaded — check your connection');
-    return;
-  }
-
-  const btn = $('#save-settings-btn');
-  btn.textContent = 'Connecting…';
-  btn.disabled = true;
-
-  try {
-    initSupabase(url, key);
-    const { error } = await supabase.from('runs').select('id').limit(1);
-    if (error && error.code !== 'PGRST116') throw error;
-    localStorage.setItem('jt_sb_url', url);
-    localStorage.setItem('jt_sb_key', key);
+$('#save-settings-btn').onclick = () => {
+  const apiKey    = $('#settings-fb-apikey').value.trim();
+  const projectId = $('#settings-fb-projectid').value.trim();
+  connectFirebase(apiKey, projectId, $('#save-settings-btn'), () => {
     $('#settings-modal').classList.add('hidden');
-    showToast('Connected to Supabase ✓');
-  } catch(e) {
-    supabase = null;
-    showToast('Connection failed: ' + (e.message || JSON.stringify(e)));
-    console.error('Supabase settings error:', e);
-  } finally {
-    btn.textContent = 'Save';
-    btn.disabled = false;
-  }
+  });
 };
 
 // ═══════════════════════════════════════════════════════════
 //  TAB NAVIGATION
 // ═══════════════════════════════════════════════════════════
-let activeTab = 'run';
-const tabs = { run: $('#run-tab'), history: $('#history-tab'), stats: $('#stats-tab'), goals: $('#goals-tab') };
-
 $all('nav button').forEach(btn => {
   btn.onclick = () => {
     $all('nav button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     const tab = btn.dataset.tab;
-    activeTab = tab;
-    Object.values(tabs).forEach(t => t.classList.remove('active'));
-    tabs[tab].classList.add('active');
+    $all('.tab').forEach(t => t.classList.remove('active'));
+    $(`#${tab}-tab`).classList.add('active');
     if (tab === 'history') loadHistory();
-    if (tab === 'stats') loadStats();
-    if (tab === 'goals') renderGoals();
+    if (tab === 'stats')   loadStats();
+    if (tab === 'goals')   renderGoals();
   };
 });
 
@@ -638,14 +623,13 @@ $all('nav button').forEach(btn => {
 // ═══════════════════════════════════════════════════════════
 let runMap = null, runPolyline = null, runMarker = null;
 let watchId = null;
-let coords = [];       // [{lat, lng, ts}]
+let coords = [];
 let distMeters = 0;
 let startTime = null;
 let pausedMs = 0;
 let pauseStart = null;
 let timerInterval = null;
 let isPaused = false;
-let runStarted = false;
 
 function initRunMap() {
   if (runMap) { runMap.remove(); runMap = null; }
@@ -659,9 +643,8 @@ function initRunMap() {
 
 function getElapsedMs() {
   if (!startTime) return 0;
-  const now = Date.now();
   if (isPaused) return pauseStart - startTime - pausedMs;
-  return now - startTime - pausedMs;
+  return Date.now() - startTime - pausedMs;
 }
 
 function updateHUD() {
@@ -669,8 +652,7 @@ function updateHUD() {
   $('#hud-time').textContent = fmtTime(elapsed);
   $('#hud-dist').textContent = fmtDist(distMeters);
   if (distMeters > 50 && elapsed > 0) {
-    const paceSecPerKm = elapsed / (distMeters / 1000);
-    $('#hud-pace').textContent = fmtPace(paceSecPerKm) + ' /km';
+    $('#hud-pace').textContent = fmtPace(elapsed / (distMeters / 1000)) + ' /km';
   } else {
     $('#hud-pace').textContent = '--:--';
   }
@@ -688,11 +670,8 @@ function onPosition(pos) {
   if (coords.length > 0) {
     const prev = coords[coords.length - 1];
     const d = haversine(prev.lat, prev.lng, lat, lng);
-    if (d > 2) {  // ignore micro-jitter < 2m
-      distMeters += d;
-    }
+    if (d > 2) distMeters += d;
   }
-
   coords.push({ lat, lng, ts });
   runPolyline.addLatLng([lat, lng]);
 
@@ -703,7 +682,6 @@ function onPosition(pos) {
       radius: 8, fillColor: '#43e97b', color: '#fff', weight: 2, fillOpacity: 1
     }).addTo(runMap);
   }
-
   runMap.panTo([lat, lng]);
 }
 
@@ -717,27 +695,17 @@ $('#start-btn').onclick = () => {
     showToast('Geolocation not supported by your browser');
     return;
   }
-
-  // Reset state
-  coords = [];
-  distMeters = 0;
-  pausedMs = 0;
-  pauseStart = null;
-  isPaused = false;
-  runStarted = true;
+  coords = []; distMeters = 0; pausedMs = 0; pauseStart = null; isPaused = false;
   startTime = Date.now();
 
   $('#run-idle').style.display = 'none';
   $('#run-active').classList.add('visible');
   initRunMap();
-
-  // Force map resize after display
   setTimeout(() => runMap && runMap.invalidateSize(), 150);
 
   watchId = navigator.geolocation.watchPosition(onPosition, onGpsError, {
     enableHighAccuracy: true, maximumAge: 0, timeout: 15000
   });
-
   timerInterval = setInterval(updateHUD, 1000);
   updateHUD();
 };
@@ -758,11 +726,7 @@ $('#pause-btn').onclick = () => {
 };
 
 $('#stop-btn').onclick = () => {
-  if (getElapsedMs() < 5000 && distMeters < 10) {
-    // Too short — just cancel
-    cancelRun();
-    return;
-  }
+  if (getElapsedMs() < 5000 && distMeters < 10) { cancelRun(); return; }
   $('#notes-modal').classList.remove('hidden');
   $('#run-notes').value = '';
 };
@@ -778,13 +742,6 @@ $('#confirm-save-btn').onclick = async () => {
   await saveRun($('#run-notes').value.trim());
 };
 
-function cancelRun() {
-  stopTracking();
-  $('#run-active').classList.remove('visible');
-  $('#run-idle').style.display = '';
-  runStarted = false;
-}
-
 function stopTracking() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
@@ -792,14 +749,18 @@ function stopTracking() {
   $('#pause-btn').textContent = '⏸ Pause';
 }
 
+function cancelRun() {
+  stopTracking();
+  $('#run-active').classList.remove('visible');
+  $('#run-idle').style.display = '';
+}
+
 async function saveRun(notes) {
   const elapsed = Math.floor(getElapsedMs() / 1000);
   stopTracking();
 
   const avgPace = distMeters > 50 ? elapsed / (distMeters / 1000) : null;
-
   const run = {
-    device_id: deviceId,
     date: new Date(startTime).toISOString(),
     duration_seconds: elapsed,
     distance_meters: distMeters,
@@ -808,21 +769,20 @@ async function saveRun(notes) {
     notes: notes || null
   };
 
-  // Save locally first
+  // Always save locally first
   const local = JSON.parse(localStorage.getItem('jt_local_runs') || '[]');
-  const localRun = { ...run, id: crypto.randomUUID(), _local: true };
-  local.unshift(localRun);
+  local.unshift({ ...run, id: crypto.randomUUID(), _local: true });
   localStorage.setItem('jt_local_runs', JSON.stringify(local));
 
-  // Try Supabase
-  if (supabase) {
+  // Try Firestore
+  if (db && authReady) {
     try {
-      const { error } = await supabase.from('runs').insert(run);
-      if (error) throw error;
+      const uid = await authReady;
+      await db.collection('users').doc(uid).collection('runs').add(run);
       showToast('Run saved to cloud ☁️');
     } catch(e) {
       showToast('Saved locally (cloud sync failed)');
-      console.warn('Supabase save error:', e);
+      console.warn('Firestore save error:', e);
     }
   } else {
     showToast('Run saved locally ✓');
@@ -839,31 +799,25 @@ let detailMaps = {};
 
 async function loadHistory() {
   $('#history-list').innerHTML = '<div class="loading"><div class="spinner"></div>Loading…</div>';
-
   let runs = [];
 
-  if (supabase) {
+  if (db && authReady) {
     try {
-      const { data, error } = await supabase
-        .from('runs')
-        .select('*')
-        .eq('device_id', deviceId)
-        .order('date', { ascending: false })
-        .limit(50);
-      if (error) throw error;
-      if (data) runs = data;
+      const uid = await authReady;
+      const snap = await db.collection('users').doc(uid).collection('runs')
+        .orderBy('date', 'desc').limit(50).get();
+      runs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     } catch(e) {
       console.warn('History fetch error:', e);
       showToast('Cloud sync error: ' + (e.message || e));
     }
   }
 
-  // Merge local runs not yet synced
-  const local = JSON.parse(localStorage.getItem('jt_local_runs') || '[]');
-  if (!supabase) {
-    runs = local;
+  if (!runs.length) {
+    runs = JSON.parse(localStorage.getItem('jt_local_runs') || '[]');
   } else {
-    // Add local-only runs that aren't in cloud
+    // Merge any local-only runs not yet in cloud
+    const local = JSON.parse(localStorage.getItem('jt_local_runs') || '[]');
     const cloudDates = new Set(runs.map(r => r.date));
     const localOnly = local.filter(r => !cloudDates.has(r.date));
     runs = [...localOnly, ...runs].sort((a,b) => new Date(b.date) - new Date(a.date));
@@ -878,9 +832,8 @@ function renderHistory(runs) {
     $('#history-list').innerHTML = '<p id="history-empty">No runs yet. Start your first run! 🏃</p>';
     return;
   }
-
   $('#history-list').innerHTML = runs.map((run, i) => `
-    <div class="run-card" data-idx="${i}" onclick="toggleCard(${i})">
+    <div class="run-card" onclick="toggleCard(${i})">
       <div class="run-card-header">
         <div>
           <div class="run-card-date">${fmtDate(run.date)}</div>
@@ -905,36 +858,33 @@ function renderHistory(runs) {
 function toggleCard(idx) {
   const detail = $(`#card-detail-${idx}`);
   const isOpen = detail.classList.contains('open');
-  // Close all
   $all('.run-card-detail').forEach(d => d.classList.remove('open'));
   if (isOpen) return;
   detail.classList.add('open');
-  // Init mini-map after display
   setTimeout(() => initMiniMap(idx), 50);
 }
 
 function initMiniMap(idx) {
   if (detailMaps[idx]) return;
   const run = allRuns[idx];
-  const coords = run.coordinates || [];
-  const el = $(`#card-map-${idx}`);
+  const pts = (run.coordinates || []);
+  const el  = $(`#card-map-${idx}`);
   if (!el) return;
 
   const m = L.map(el, { zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false });
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(m);
 
-  if (coords.length > 1) {
-    const latlngs = coords.map(c => [c.lat, c.lng]);
+  if (pts.length > 1) {
+    const latlngs = pts.map(c => [c.lat, c.lng]);
     L.polyline(latlngs, { color: '#6c63ff', weight: 3 }).addTo(m);
     m.fitBounds(latlngs, { padding: [12, 12] });
-    L.circleMarker(latlngs[0], { radius: 6, fillColor: '#43e97b', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(m);
-    L.circleMarker(latlngs[latlngs.length-1], { radius: 6, fillColor: '#ff6584', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(m);
-  } else if (coords.length === 1) {
-    m.setView([coords[0].lat, coords[0].lng], 15);
+    L.circleMarker(latlngs[0],               { radius: 6, fillColor: '#43e97b', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(m);
+    L.circleMarker(latlngs[latlngs.length-1],{ radius: 6, fillColor: '#ff6584', color: '#fff', weight: 2, fillOpacity: 1 }).addTo(m);
+  } else if (pts.length === 1) {
+    m.setView([pts[0].lat, pts[0].lng], 15);
   } else {
     m.setView([0, 0], 2);
   }
-
   detailMaps[idx] = m;
 }
 
@@ -945,64 +895,49 @@ let weeklyChart = null, paceChart = null;
 
 async function loadStats() {
   let runs = [];
-  if (supabase) {
+
+  if (db && authReady) {
     try {
-      const { data, error } = await supabase
-        .from('runs')
-        .select('date,duration_seconds,distance_meters,avg_pace_sec_per_km')
-        .eq('device_id', deviceId)
-        .order('date', { ascending: false })
-        .limit(200);
-      if (error) throw error;
-      if (data) runs = data;
+      const uid = await authReady;
+      const snap = await db.collection('users').doc(uid).collection('runs')
+        .orderBy('date', 'desc').limit(200).get();
+      runs = snap.docs.map(d => d.data());
     } catch(e) {
       console.warn('Stats fetch error:', e);
       showToast('Cloud sync error: ' + (e.message || e));
     }
   }
+
   if (!runs.length) {
-    const local = JSON.parse(localStorage.getItem('jt_local_runs') || '[]');
-    runs = local;
+    runs = JSON.parse(localStorage.getItem('jt_local_runs') || '[]');
   }
 
-  // Summary
-  const totalKm = runs.reduce((s,r) => s + (r.distance_meters||0)/1000, 0);
-  const bestPace = runs.reduce((best,r) => {
-    if (!r.avg_pace_sec_per_km) return best;
-    return best === null || r.avg_pace_sec_per_km < best ? r.avg_pace_sec_per_km : best;
-  }, null);
-  const longest = runs.reduce((mx,r) => r.distance_meters > mx ? r.distance_meters : mx, 0);
+  // Summary cards
+  const totalKm  = runs.reduce((s,r) => s + (r.distance_meters||0)/1000, 0);
+  const bestPace = runs.reduce((b,r) => (!r.avg_pace_sec_per_km ? b : b === null || r.avg_pace_sec_per_km < b ? r.avg_pace_sec_per_km : b), null);
+  const longest  = runs.reduce((mx,r) => r.distance_meters > mx ? r.distance_meters : mx, 0);
 
   $('#stat-total-runs').textContent = runs.length;
-  $('#stat-total-km').textContent = totalKm.toFixed(1) + ' km';
-  $('#stat-best-pace').textContent = bestPace ? fmtPace(bestPace) + '/km' : '—';
-  $('#stat-longest').textContent = longest ? fmtDist(longest) : '—';
+  $('#stat-total-km').textContent   = totalKm.toFixed(1) + ' km';
+  $('#stat-best-pace').textContent  = bestPace ? fmtPace(bestPace) + '/km' : '—';
+  $('#stat-longest').textContent    = longest ? fmtDist(longest) : '—';
 
   // Weekly distance (last 8 weeks)
-  const weekLabels = [];
-  const weekData = [];
   const now = new Date();
+  const weekLabels = [], weekData = [];
   for (let w = 7; w >= 0; w--) {
-    const weekStart = new Date(now);
-    weekStart.setDate(now.getDate() - now.getDay() - w * 7);
-    weekStart.setHours(0,0,0,0);
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekStart.getDate() + 7);
-    const km = runs
-      .filter(r => { const d = new Date(r.date); return d >= weekStart && d < weekEnd; })
-      .reduce((s,r) => s + (r.distance_meters||0)/1000, 0);
-    const label = `${weekStart.getMonth()+1}/${weekStart.getDate()}`;
-    weekLabels.push(label);
+    const wStart = new Date(now); wStart.setDate(now.getDate() - now.getDay() - w * 7); wStart.setHours(0,0,0,0);
+    const wEnd   = new Date(wStart); wEnd.setDate(wStart.getDate() + 7);
+    const km = runs.filter(r => { const d = new Date(r.date); return d >= wStart && d < wEnd; })
+                   .reduce((s,r) => s + (r.distance_meters||0)/1000, 0);
+    weekLabels.push(`${wStart.getMonth()+1}/${wStart.getDate()}`);
     weekData.push(parseFloat(km.toFixed(2)));
   }
 
   if (weeklyChart) weeklyChart.destroy();
   weeklyChart = new Chart($('#chart-weekly'), {
     type: 'bar',
-    data: {
-      labels: weekLabels,
-      datasets: [{ label: 'km', data: weekData, backgroundColor: 'rgba(108,99,255,.7)', borderRadius: 6, borderSkipped: false }]
-    },
+    data: { labels: weekLabels, datasets: [{ label: 'km', data: weekData, backgroundColor: 'rgba(108,99,255,.7)', borderRadius: 6, borderSkipped: false }] },
     options: {
       responsive: true, maintainAspectRatio: true,
       plugins: { legend: { display: false } },
@@ -1015,16 +950,14 @@ async function loadStats() {
 
   // Pace trend (last 20)
   const recent = runs.filter(r => r.avg_pace_sec_per_km).slice(0, 20).reverse();
-  const paceLabels = recent.map(r => fmtDate(r.date).split(',')[0]);
-  const paceData = recent.map(r => parseFloat((r.avg_pace_sec_per_km / 60).toFixed(2)));
-
   if (paceChart) paceChart.destroy();
   paceChart = new Chart($('#chart-pace'), {
     type: 'line',
     data: {
-      labels: paceLabels,
+      labels: recent.map(r => fmtDate(r.date).split(',')[0]),
       datasets: [{
-        label: 'min/km', data: paceData,
+        label: 'min/km',
+        data: recent.map(r => parseFloat((r.avg_pace_sec_per_km / 60).toFixed(2))),
         borderColor: '#f7c948', backgroundColor: 'rgba(247,201,72,.1)',
         tension: .3, fill: true, pointRadius: 3, pointBackgroundColor: '#f7c948'
       }]
@@ -1035,9 +968,7 @@ async function loadStats() {
       scales: {
         x: { ticks: { color: '#7f7f9a', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,.05)' } },
         y: {
-          ticks: { color: '#7f7f9a', font: { size: 10 },
-            callback: v => `${Math.floor(v)}:${String(Math.round((v%1)*60)).padStart(2,'0')}`
-          },
+          ticks: { color: '#7f7f9a', font: { size: 10 }, callback: v => `${Math.floor(v)}:${String(Math.round((v%1)*60)).padStart(2,'0')}` },
           grid: { color: 'rgba(255,255,255,.05)' }, reverse: true
         }
       }
@@ -1050,14 +981,14 @@ async function loadStats() {
 // ═══════════════════════════════════════════════════════════
 function loadGoals() {
   const goals = JSON.parse(localStorage.getItem('jt_goals') || '{}');
-  if (goals.km) $('#goal-km').value = goals.km;
+  if (goals.km)   $('#goal-km').value   = goals.km;
   if (goals.runs) $('#goal-runs').value = goals.runs;
 }
 
 $('#save-goals-btn').onclick = () => {
   const goals = {
-    km: parseFloat($('#goal-km').value) || 0,
-    runs: parseInt($('#goal-runs').value) || 0
+    km:   parseFloat($('#goal-km').value)  || 0,
+    runs: parseInt($('#goal-runs').value)  || 0
   };
   localStorage.setItem('jt_goals', JSON.stringify(goals));
   showToast('Goals saved ✓');
@@ -1068,23 +999,24 @@ async function renderGoals() {
   loadGoals();
   const goals = JSON.parse(localStorage.getItem('jt_goals') || '{}');
 
-  // Get this week's runs
   const now = new Date();
   const weekStart = new Date(now);
   weekStart.setDate(now.getDate() - now.getDay());
   weekStart.setHours(0,0,0,0);
 
   let runs = JSON.parse(localStorage.getItem('jt_local_runs') || '[]');
-  if (supabase) {
+
+  if (db && authReady) {
     try {
-      const { data } = await supabase.from('runs').select('date,distance_meters')
-        .eq('device_id', deviceId).gte('date', weekStart.toISOString());
-      if (data) runs = data;
-    } catch(e) {}
+      const uid = await authReady;
+      const snap = await db.collection('users').doc(uid).collection('runs')
+        .where('date', '>=', weekStart.toISOString()).get();
+      if (!snap.empty) runs = snap.docs.map(d => d.data());
+    } catch(e) { /* fall through to localStorage */ }
   }
 
   const weekRuns = runs.filter(r => new Date(r.date) >= weekStart);
-  const weekKm = weekRuns.reduce((s,r) => s + (r.distance_meters||0)/1000, 0);
+  const weekKm   = weekRuns.reduce((s,r) => s + (r.distance_meters||0)/1000, 0);
   const weekCount = weekRuns.length;
 
   if (goals.km > 0) {
